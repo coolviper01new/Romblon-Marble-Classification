@@ -1,0 +1,251 @@
+# ====================== DATA LOADING AND AUGMENTATION FUNCTIONS ====================== 
+#  Genetic Algorithm Augmentation
+class AugmentationOperation:
+    def __init__(self, augmentation_type, prob=1.0):
+        self.augmentation_type = augmentation_type
+        self.prob = prob  # Probability of applying this augmentation
+        self.parameters = self.initialize_parameters()
+
+    def initialize_parameters(self):
+        if self.augmentation_type == "Rotation":
+            return {"angle": random.uniform(-25, 25)}  # Random angle within range
+        elif self.augmentation_type == "Flip":
+            return {"direction": random.choice([0, 1])}
+        elif self.augmentation_type == "Brightness":
+            return {"brightness_factor": random.uniform(0.8, 1.2)}
+        elif self.augmentation_type == "Contrast":
+            return {"contrast_factor": random.uniform(0.8, 1.2)}
+        else:
+            raise ValueError(f"Unknown augmentation type: {self.augmentation_type}")
+
+    def apply(self, image):
+        # Ensure image is in the correct format for tf operations
+        image = tf.convert_to_tensor(image, dtype=tf.float32)
+
+        if self.augmentation_type == "Rotation" and random.random() < self.prob:
+            angle_rad = self.parameters["angle"] * (np.pi / 180)  # Convert degrees to radians
+            rotation_angle = round(self.parameters["angle"] / 90)  # Calculate the number of 90-degree rotations
+            image = tf.image.rot90(image, k=rotation_angle)  # Apply 'k' times 90-degree rotations
+
+        elif self.augmentation_type == "Flip" and random.random() < self.prob:
+            if self.parameters["direction"] == 0:  # Horizontal flip
+                image = tf.image.flip_left_right(image)
+            else:  # Vertical flip
+                image = tf.image.flip_up_down(image)
+
+        elif self.augmentation_type == "Zoom" and random.random() < self.prob:
+            image_shape = tf.shape(image).numpy()
+            zoomed_shape = tuple(int(dim * self.parameters["zoom_factor"]) for dim in image_shape[:2])
+            image = tf.image.resize(image, size=zoomed_shape)
+            image = tf.image.resize_with_crop_or_pad(image, image_shape[0], image_shape[1])
+
+        elif self.augmentation_type == "Brightness" and random.random() < self.prob:
+            image = tf.image.adjust_brightness(image, delta=self.parameters["brightness_factor"] - 1)
+
+        elif self.augmentation_type == "Contrast" and random.random() < self.prob:
+            image = tf.image.adjust_contrast(image, contrast_factor=self.parameters["contrast_factor"])
+
+        return image
+
+
+
+def display_augmentation(original_imgs, augmented_imgs, augmentations_list, labels, generation_num):
+    num_images = len(original_imgs)
+    
+    if num_images == 1:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        axes = [axes]
+    else:
+        fig, axes = plt.subplots(num_images, 2, figsize=(10, 5 * num_images))
+    
+    for i, (original, augmented, augmentations, label) in enumerate(zip(original_imgs, augmented_imgs, augmentations_list, labels)):
+        print(f"Processing Image {i}, Label: {label}, Augmentations: {augmentations}")
+        axes[i][0].imshow(original)
+        axes[i][0].set_title(f"Generation {generation_num}: Original Image - {label}")
+        axes[i][0].axis('off')
+
+        axes[i][1].imshow(augmented)
+        axes[i][1].set_title(f"Generation {generation_num}: Augmented Image - {label}\n{augmentations}")
+        axes[i][1].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+def apply_augmentations(img):
+    # Ensure img has the shape (224, 224, 3)
+    if img.shape != (224, 224, 3):
+        print(f"Warning: Incorrect image shape encountered in genetic_augmentation: {img.shape}")
+        return img  # Skip this image
+
+    # Use the predefined layers for augmentation
+    augmentations = []
+    augmented_img = rotation_layer(tf.expand_dims(img, 0))
+    augmentations.append("Rotation")
+    augmented_img = flip_layer(augmented_img)
+    augmentations.append("Flip")
+    augmented_img = zoom_layer(augmented_img)
+    augmentations.append("Zoom")
+    augmented_img = tf.image.random_brightness(augmented_img, 0.1)
+    augmentations.append("Brightness")
+    augmented_img = contrast_layer(augmented_img)
+    augmentations.append("Contrast")
+    
+    return tf.squeeze(augmented_img, axis=0), ', '.join(augmentations) 
+
+
+def fitness_function(original, augmented):
+    difference = tf.math.reduce_mean(tf.abs(original - augmented))
+    return difference.numpy()
+
+def save_augmented_images(images, labels, save_path):
+    for image, label in zip(images, labels):
+        class_dir = os.path.join(save_path, label_to_class[label])
+        if not os.path.exists(class_dir):
+            os.makedirs(class_dir)
+        image_path = os.path.join(class_dir, f"{label}_{hash(str(image.tobytes()))}.jpg")
+        tf.keras.preprocessing.image.save_img(image_path, image)
+        
+def genetic_augmentation(images, image_labels, generations=5):
+    try:
+        print("Applying Genetic Algorithm Augmentation...")
+        possible_augmentations = ["Rotation", "Flip", "Zoom", "Brightness", "Contrast"]
+        print("Possible augmentations to be used:", ", ".join(possible_augmentations))
+        print("-"*80)  # For visual separation in the output
+
+        augmented_images = []
+        images_dataset = tf.data.Dataset.from_tensor_slices(images)
+
+        # Prompt user for the number of images to display:
+        while True:
+            try:
+                num_images_to_display = int(input("Enter the number of sample augmented images to display (Max 10): "))
+                if 1 <= num_images_to_display <= 10:
+                    break
+                else:
+                    print("Please enter a number between 1 and 10.")
+            except ValueError:
+                print("Please enter a valid number.")
+
+        for gen in tqdm(range(generations), desc="Generations"):
+            print("-"*80)  # For visual separation in the output
+            print(f"Processing generation {gen+1}/{generations}...")
+
+            # Mutation: Apply all augmentations
+            augmented_dataset = images_dataset.map(lambda img: tuple(tf.numpy_function(apply_augmentations, [img], [tf.float32, tf.string])))
+            augmented_dataset_list, augmentations_list = zip(*list(augmented_dataset.as_numpy_iterator()))
+
+            # Append mutation-augmented images to augmented_images
+            augmented_images.extend(augmented_dataset_list)
+
+            # Calculate fitness scores
+            fitness_scores = [fitness_function(images[i], augmented_img) for i, augmented_img in enumerate(augmented_images[:len(images)])]
+
+            # Selecting the top N images
+            N = len(images)
+            selected_indices = np.argsort(fitness_scores)[-N:]
+            augmented_images = [augmented_images[i] for i in selected_indices]
+
+            # Display random selected images using the provided code:
+            random_indices = random.sample(range(len(images)), min(num_images_to_display, 10))  # Restrict to max 10 or user input
+            random_originals = [images[i] for i in random_indices]
+            random_labels = [image_labels[i] for i in random_indices]
+            random_augmenteds = [augmented_dataset_list[i] for i in random_indices]
+            random_augmentations = [augmentations_list[i] for i in random_indices]
+            display_augmentation(random_originals, random_augmenteds, random_augmentations, random_labels, gen + 1)
+
+            # Crossover: Average of two images
+            for i in range(0, len(images)):
+                parent1 = images[i]
+                parent2 = images[(i + 1) % len(images)]
+                offspring = (tf.expand_dims(parent1, 0) + tf.expand_dims(parent2, 0)) / 2.0
+                offspring = tf.squeeze(offspring, axis=0)
+                augmented_images.append(offspring)
+
+        # Only take as many augmented images as the original dataset size
+        augmented_images = augmented_images[:len(images)]
+        return augmented_images
+
+
+    except Exception as e:
+        print(f"An error occurred during the genetic augmentation: {e}")
+        return images  # Return the original images if any error occurs during augmentation
+
+def check_balance(labels):
+    unique, counts = np.unique(labels, return_counts=True)
+    class_counts = dict(zip(unique, counts))
+    
+    # Print the counts
+    print("-"*80)  # For visual separation in the output
+    print(f"Class distribution: {class_counts}")
+    
+    # Check for balance (you can customize the threshold)
+    max_count = max(class_counts.values())
+    min_count = min(class_counts.values())
+    is_balanced = max_count <= 1.1 * min_count  # Allow a 10% difference, adjust as necessary
+    
+    return is_balanced
+
+def get_dataset_size(dataset, batch_size):
+    num_batches = tf.data.experimental.cardinality(dataset).numpy()
+    total_size = (num_batches - 1) * batch_size + len(list(dataset.as_numpy_iterator())[-1][0])
+    return total_size
+
+def split_data(all_images, all_labels): 
+    #This is for the Hyperparameter Tuning
+    temp_images, hyperparam_images, temp_labels, hyperparam_labels = train_test_split(all_images, all_labels, test_size=0.10, stratify=all_labels)
+    #Splitting the remaining data for Training, Validation and Testing
+    # 70% of the remaining for training, and 30% for validation and testing
+    train_images, temp2_images, train_labels, temp2_labels = train_test_split(temp_images, temp_labels, test_size=0.3, stratify=temp_labels)
+    
+    # Splitting the above 30% equally into validation and testing sets
+    val_images, test_images, val_labels, test_labels = train_test_split(temp2_images, temp2_labels, test_size=0.5, stratify=temp2_labels)
+    
+    return train_images, hyperparam_images, val_images, test_images, train_labels, hyperparam_labels, val_labels, test_labels
+
+def resize_image(img, target_size):
+    img = Image.fromarray(np.uint8(img))
+    img = img.resize(target_size, Image.ANTIALIAS)
+    img = np.array(img).astype(np.float32)  # Convert the image to float32
+    return img
+
+
+def load_data(dataset_path, image_size=(224, 224), batch_size=32):
+    datagen = ImageDataGenerator(rescale=1./255)
+    all_data_gen = datagen.flow_from_directory(
+        dataset_path,
+        target_size=image_size,
+        class_mode='sparse',
+        batch_size=batch_size,
+        shuffle=True
+    )
+
+    # Print the class names here:
+    class_names = list(all_data_gen.class_indices.keys())
+    print("Class names:", class_names)
+    
+    # Accessing the first batch of images:
+    batch_0 = all_data_gen[0]
+    print(f"Initial images shape: {batch_0[0][0].shape}")  # print shape of the first image in the first batch
+
+    
+    all_images_list = []
+    all_labels_list = []
+
+    num_batches = len(all_data_gen)
+    for i in tqdm(range(num_batches), desc="Loading data batches"):
+        batch = all_data_gen[i]
+        all_images_list.append(batch[0])
+        all_labels_list.append(batch[1])
+    
+    all_images = np.concatenate(all_images_list, axis=0)
+    all_labels = np.concatenate(all_labels_list, axis=0)
+    
+    return all_images, all_labels, all_data_gen
+
+def apply_augmentation(train_images, train_labels, augment_type):
+    if augment_type == "genetic":
+        # Convert numerical labels back to class names
+        train_labels_str = [label_to_class[label] for label in train_labels]
+        augmented_images = genetic_augmentation(train_images, train_labels_str)
+        train_images = np.array(augmented_images)
+    return train_images, train_labels
